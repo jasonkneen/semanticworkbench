@@ -2,8 +2,14 @@ import logging
 from contextlib import AsyncExitStack
 from typing import Any
 
-from assistant_extensions.attachments import AttachmentsExtension
-from assistant_extensions.chat_context_toolkit.archive import ArchiveTaskQueues
+from assistant_extensions.attachments import get_attachments
+from assistant_extensions.chat_context_toolkit.archive import (
+    ArchiveTaskQueues,
+    construct_archive_summarizer,
+)
+from assistant_extensions.chat_context_toolkit.message_history import (
+    construct_attachment_summarizer,
+)
 from assistant_extensions.mcp import (
     MCPClientSettings,
     MCPServerConnectionError,
@@ -36,7 +42,6 @@ archive_task_queues = ArchiveTaskQueues()
 
 async def respond_to_conversation(
     message: ConversationMessage,
-    attachments_extension: AttachmentsExtension,
     context: ConversationContext,
     config: AssistantConfigModel,
     metadata: dict[str, Any] = {},
@@ -136,7 +141,6 @@ async def respond_to_conversation(
                 sampling_handler=sampling_handler,
                 mcp_sessions=mcp_sessions,
                 mcp_prompts=mcp_prompts,
-                attachments_extension=attachments_extension,
                 context=context,
                 request_config=request_config,
                 service_config=service_config,
@@ -169,8 +173,19 @@ async def respond_to_conversation(
         # enqueue an archive task for this conversation
         await archive_task_queues.enqueue_run(
             context=context,
-            service_config=service_config,
-            request_config=request_config,
+            attachments=list(
+                await get_attachments(
+                    context,
+                    summarizer=construct_attachment_summarizer(
+                        service_config=service_config,
+                        request_config=request_config,
+                    ),
+                )
+            ),
+            archive_summarizer=construct_archive_summarizer(
+                service_config=service_config,
+                request_config=request_config,
+            ),
             archive_task_config=ArchiveTaskConfig(
                 chunk_token_count_threshold=config.chat_context_config.archive_token_threshold
             ),

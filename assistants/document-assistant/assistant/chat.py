@@ -4,7 +4,6 @@
 # Document Assistant
 #
 
-import asyncio
 import logging
 import pathlib
 from textwrap import dedent
@@ -12,7 +11,11 @@ from typing import Any
 
 import deepmerge
 from assistant_extensions import dashboard_card, navigator
+from assistant_extensions.attachments import get_attachments
+from assistant_extensions.chat_context_toolkit.archive import ArchiveTaskQueues, construct_archive_summarizer
+from assistant_extensions.chat_context_toolkit.message_history import construct_attachment_summarizer
 from assistant_extensions.mcp import MCPServerConfig
+from chat_context_toolkit.archive import ArchiveTaskConfig
 from content_safety.evaluators import CombinedContentSafetyEvaluator
 from semantic_workbench_api_model.workbench_model import (
     ConversationEvent,
@@ -29,8 +32,6 @@ from semantic_workbench_assistant.assistant_app import (
 )
 
 from assistant.config import AssistantConfigModel
-from assistant.context_management.conv_compaction import task_compact_conversation
-from assistant.context_management.file_manager import task_score_files
 from assistant.context_management.inspector import ContextManagementInspector
 from assistant.filesystem import AttachmentsExtension, DocumentEditorConfigModel
 from assistant.guidance.dynamic_ui_inspector import DynamicUIInspector
@@ -52,6 +53,8 @@ service_description = "An assistant for writing documents."
 # create the configuration provider, using the extended configuration model
 #
 assistant_config = BaseModelAssistantConfig(AssistantConfigModel)
+
+archive_task_queues = ArchiveTaskQueues()
 
 
 # define the content safety evaluator factory
@@ -187,10 +190,6 @@ async def on_message_created(
         config = await assistant_config.get(context.assistant)
         metadata: dict[str, Any] = {"debug": {"content_safety": event.data.get(content_safety.metadata_key, {})}}
 
-        asyncio.create_task(  # Fire off the compaction task in the background
-            task_compact_conversation(context=context, config=config, attachments_extension=attachments_extension)
-        )
-
         try:
             responder = await ConversationResponder.create(
                 message=message,
@@ -212,13 +211,21 @@ async def on_message_created(
                 )
             )
 
-        asyncio.create_task(
-            task_score_files(
-                context=context,
-                config=config,
-                attachments_extension=attachments_extension,
-                context_management_inspector=context_management_inspector,
-            )
+        attachments = await get_attachments(
+            context=context,
+            summarizer=construct_attachment_summarizer(
+                service_config=config.generative_ai_fast_client_config.service_config,
+                request_config=config.generative_ai_fast_client_config.request_config,
+            ),
+        )
+        await archive_task_queues.enqueue_run(
+            context=context,
+            attachments=attachments,
+            archive_task_config=ArchiveTaskConfig(chunk_token_count_threshold=30_000),
+            archive_summarizer=construct_archive_summarizer(
+                service_config=config.generative_ai_fast_client_config.service_config,
+                request_config=config.generative_ai_fast_client_config.request_config,
+            ),
         )
 
 

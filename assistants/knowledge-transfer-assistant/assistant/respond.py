@@ -32,6 +32,7 @@ from .config import assistant_config
 from .data import RequestStatus
 from .logging import logger
 from .manager import KnowledgeTransferManager
+from .state_inspector import get_priority_emoji, get_status_emoji
 from .storage import ShareStorage
 from .storage_models import ConversationRole, CoordinatorConversationMessage
 from .string_utils import Context, ContextStrategy, Instructions, Prompt, TokenBudget
@@ -75,7 +76,7 @@ class TeamOutput(BaseModel):
     """
     Attributes:
         citations: A list of citations from which the response is generated. There should always be at least one citation, but it can be empty if the assistant has no relevant information to cite.
-        excerpt: A verbatim excerpt from one of the cited works that illustrates why this response was given. It should have enough context to get a good idea of what's in that part of the cited work. If there is no relevant excerpt, this will be None.
+        excerpt: A verbatim excerpt from one of the cited works that illustrates why this response was given. It should have enough context to get a good idea of what's in that part of the cited work. DO NOT excerpt from CONVERSATION or DIGEST, only from attachments. If there is no relevant excerpt, this will be None.
         next_step_suggestion: Suggest more areas to explore using content from the knowledge digest to ensure your conversation covers all of the relevant information.
     """
 
@@ -83,7 +84,7 @@ class TeamOutput(BaseModel):
         description="A list of citations from which the response is generated. There should always be at least one citation, but it can be empty if the assistant has no relevant information to cite.",
     )
     excerpt: str | None = Field(
-        description="A verbatim excerpt from one of the cited works that illustrates why this response was given. It should have enough context to get a good idea of what's in that part of the cited work. If there is no relevant excerpt, this will be None.",
+        description="A verbatim excerpt from one of the cited works that illustrates why this response was given. It should have enough context to get a good idea of what's in that part of the cited work. DO NOT excerpt from CONVERSATION or DIGEST, only from attachments. If there is no relevant excerpt, this will be None.",
     )
     response: str = Field(
         description="The response from the assistant.",
@@ -283,14 +284,9 @@ async def respond_to_conversation(
         if active_requests:
             coordinator_requests = "> 📋 **Use the request ID (not the title) with resolve_information_request()**\n\n"
             for req in active_requests[:10]:  # Limit to 10 for brevity
-                priority_marker = {
-                    "low": "🔹",
-                    "medium": "🔶",
-                    "high": "🔴",
-                    "critical": "⚠️",
-                }.get(req.priority.value, "🔹")
-
-                coordinator_requests += f"{priority_marker} **{req.title}** ({req.status.value})\n"
+                priority_emoji = get_priority_emoji(req.priority)
+                status_emoji = get_status_emoji(req.status)
+                coordinator_requests += f"{priority_emoji} **{req.title}** {status_emoji}\n"
                 coordinator_requests += f"   **Request ID:** `{req.request_id}`\n"
                 coordinator_requests += f"   **Description:** {req.description}\n\n"
 
@@ -462,9 +458,14 @@ async def respond_to_conversation(
 
         for msg in reversed(messages_list):
             if msg.sender.participant_id == context.assistant.id:
+                # For assistant messages, include help suggestions as part of the message content
+                message_content = format_message(participants, msg)
+                if msg.metadata and "help" in msg.metadata:
+                    message_content += f"\n\n[Next step?: {msg.metadata['help']}]"
+
                 current_message = ChatCompletionAssistantMessageParam(
                     role="assistant",
-                    content=format_message(participants, msg),
+                    content=message_content,
                 )
             else:
                 current_message = ChatCompletionUserMessageParam(

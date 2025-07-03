@@ -6,11 +6,14 @@ from chat_context_toolkit.virtual_filesystem import (
     FileEntry,
     FileSource,
     MountPoint,
-    WriteToolDefinition,
 )
+from openai_client import OpenAIRequestConfig, ServiceConfig, create_client
 from semantic_workbench_assistant.assistant_app import ConversationContext
 
-from assistant_extensions.attachments import AttachmentsExtension, get_attachments
+from assistant_extensions.attachments._model import Summarizer
+
+from ...attachments import get_attachments
+from ...attachments._summarizer import LLMConfig, LLMFileSummarizer, get_attachment_summary
 
 logger = logging.getLogger(__name__)
 
@@ -18,15 +21,14 @@ logger = logging.getLogger(__name__)
 class AttachmentsVirtualFileSystemFileSource(FileSource):
     """File source for the attachments."""
 
-    def __init__(self, attachments_extension: AttachmentsExtension, context: ConversationContext) -> None:
+    def __init__(
+        self,
+        context: ConversationContext,
+        summarizer: Summarizer,
+    ) -> None:
         """Initialize the file source with the conversation context."""
-        self.attachments_extension = attachments_extension
         self.context = context
-
-    @property
-    def write_tools(self) -> Iterable[WriteToolDefinition]:
-        """Get the list of write tools provided by this file system provider."""
-        return []
+        self.summarizer = summarizer
 
     async def list_directory(self, path: str) -> Iterable[DirectoryEntry | FileEntry]:
         """
@@ -64,7 +66,7 @@ class AttachmentsVirtualFileSystemFileSource(FileSource):
                     size=file.file_size,
                     timestamp=file.updated_datetime,
                     permission="read",
-                    description="",
+                    description=(await get_attachment_summary(context=self.context, filename=file.filename)).summary,
                 )
             )
 
@@ -81,7 +83,10 @@ class AttachmentsVirtualFileSystemFileSource(FileSource):
         workbench_path = path.lstrip("/")
 
         attachments = await get_attachments(
-            context=self.context, include_filenames=[workbench_path], exclude_filenames=[]
+            context=self.context,
+            include_filenames=[workbench_path],
+            exclude_filenames=[],
+            summarizer=self.summarizer,
         )
         if not attachments:
             raise FileNotFoundError(f"File not found: {path}")
@@ -90,7 +95,7 @@ class AttachmentsVirtualFileSystemFileSource(FileSource):
 
 
 def attachments_file_source_mount(
-    attachments_extension: AttachmentsExtension, context: ConversationContext
+    context: ConversationContext, service_config: ServiceConfig, request_config: OpenAIRequestConfig
 ) -> MountPoint:
     return MountPoint(
         entry=DirectoryEntry(
@@ -99,6 +104,13 @@ def attachments_file_source_mount(
             permission="read",
         ),
         file_source=AttachmentsVirtualFileSystemFileSource(
-            attachments_extension=attachments_extension, context=context
+            context=context,
+            summarizer=LLMFileSummarizer(
+                llm_config=LLMConfig(
+                    client_factory=lambda: create_client(service_config),
+                    model=request_config.model,
+                    max_response_tokens=request_config.response_tokens,
+                )
+            ),
         ),
     )
